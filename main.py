@@ -1,6 +1,5 @@
 import os
 import asyncio
-import time
 from datetime import datetime, timedelta
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -24,9 +23,15 @@ TIME_WINDOW = int(os.getenv("TIME_WINDOW_HOURS", 12))
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+LAST_ID_FILE = "last_id.txt"
+
 upload_count = 0
 window_start = datetime.now()
 
+
+# --------------------------
+# Utility Functions
+# --------------------------
 
 def format_size(size):
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -34,6 +39,30 @@ def format_size(size):
             return f"{size:.2f} {unit}"
         size /= 1024
 
+
+def get_last_processed_id():
+    if os.path.exists(LAST_ID_FILE):
+        with open(LAST_ID_FILE, "r") as f:
+            return int(f.read().strip())
+    return 1  # Start from ID 1
+
+
+def save_last_processed_id(message_id):
+    with open(LAST_ID_FILE, "w") as f:
+        f.write(str(message_id))
+
+
+async def reset_window_if_needed():
+    global upload_count, window_start
+    if datetime.now() > window_start + timedelta(hours=TIME_WINDOW):
+        upload_count = 0
+        window_start = datetime.now()
+        print("🔄 Upload window reset")
+
+
+# --------------------------
+# Health Server
+# --------------------------
 
 async def health(request):
     return web.Response(text="Bot is running ✅")
@@ -49,40 +78,51 @@ async def start_health_server():
     await site.start()
 
 
-async def reset_window_if_needed():
-    global upload_count, window_start
-    if datetime.now() > window_start + timedelta(hours=TIME_WINDOW):
-        upload_count = 0
-        window_start = datetime.now()
-        print("🔄 Upload window reset")
-
+# --------------------------
+# Main Logic
+# --------------------------
 
 async def main():
-    global upload_count
+    global upload_count, window_start
 
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
     await client.start()
-
     print("✅ Logged in successfully")
 
-    async for message in client.iter_messages(SOURCE_CHANNEL, reverse=True):
+    current_id = get_last_processed_id()
 
+    while True:
         await reset_window_if_needed()
 
         if upload_count >= MAX_FILES:
-            wait_time = (window_start + timedelta(hours=TIME_WINDOW) - datetime.now()).total_seconds()
-            print(f"⏳ Limit reached. Sleeping for {int(wait_time)} seconds")
+            wait_time = (
+                window_start + timedelta(hours=TIME_WINDOW) - datetime.now()
+            ).total_seconds()
+
+            print(f"⏳ Limit reached. Sleeping {int(wait_time)} seconds")
             await asyncio.sleep(wait_time)
+
             upload_count = 0
             window_start = datetime.now()
 
-        if not message.media:
-            continue
-
         try:
+            message = await client.get_messages(SOURCE_CHANNEL, ids=current_id)
+
+            # If message not found (deleted/missing)
+            if not message:
+                print(f"⚠ Skipped missing ID {current_id}")
+                current_id += 1
+                continue
+
+            # If no media
+            if not message.media:
+                current_id += 1
+                continue
+
             file_path = await client.download_media(message.media, file=DOWNLOAD_DIR)
 
             if not file_path:
+                current_id += 1
                 continue
 
             original_name = os.path.basename(file_path)
@@ -107,20 +147,28 @@ async def main():
             )
 
             upload_count += 1
-            print(f"✅ Uploaded: {new_name}")
+            print(f"✅ Uploaded ID {current_id}: {new_name}")
 
             os.remove(new_path)
 
-            await asyncio.sleep(5)  # small delay safety
+            save_last_processed_id(current_id)
+            current_id += 1
+
+            await asyncio.sleep(5)
 
         except FloodWaitError as e:
             print(f"⚠ FloodWait: Sleeping {e.seconds} seconds")
             await asyncio.sleep(e.seconds)
 
         except Exception as e:
-            print(f"❌ Error: {e}")
-            await asyncio.sleep(10)
+            print(f"❌ Error at ID {current_id}: {e}")
+            current_id += 1
+            await asyncio.sleep(2)
 
+
+# --------------------------
+# Run Bot
+# --------------------------
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
