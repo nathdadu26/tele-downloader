@@ -108,7 +108,7 @@ async def main():
         try:
             message = await client.get_messages(SOURCE_CHANNEL, ids=current_id)
 
-            # If message not found (deleted/missing)
+            # If message missing / deleted
             if not message:
                 print(f"⚠ Skipped missing ID {current_id}")
                 current_id += 1
@@ -154,7 +154,8 @@ async def main():
             save_last_processed_id(current_id)
             current_id += 1
 
-            await asyncio.sleep(5)
+            print("⏳ Waiting 10 seconds before next upload...")
+            await asyncio.sleep(10)
 
         except FloodWaitError as e:
             print(f"⚠ FloodWait: Sleeping {e.seconds} seconds")
